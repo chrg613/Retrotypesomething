@@ -16,8 +16,10 @@ import html
 from datetime import datetime
 import platform
 import glob
+import threading
+from pathlib import Path
 
-# --- Enhanced Configuration ---
+# --- Enhanced Configuration with Dynamic Detection ---
 GAMES_DIRECTORY = os.path.join(os.path.dirname(__file__), "Games")
 EMULATORS_DIRECTORY = os.path.join(os.path.dirname(__file__), "Emulators")
 CORES_DIRECTORY = os.path.join(os.path.dirname(__file__), "Cores")
@@ -126,22 +128,51 @@ GAME_DATABASE = {
         'system': 'Game Boy Advance',
         'year': '2002'
     },
+    'pokemon ruby': {
+        'full_name': 'Pokémon Ruby Version',
+        'series': 'Pokémon',
+        'generation': 'Gen III',
+        'system': 'Game Boy Advance',
+        'year': '2002'
+    },
+    'pokemon emerald': {
+        'full_name': 'Pokémon Emerald Version',
+        'series': 'Pokémon',
+        'generation': 'Gen III',
+        'system': 'Game Boy Advance',
+        'year': '2004'
+    },
     'zelda': {
         'full_name': 'The Legend of Zelda',
         'series': 'The Legend of Zelda',
         'system': 'Game Boy',
         'year': '1989'
+    },
+    'link\'s awakening': {
+        'full_name': 'The Legend of Zelda: Link\'s Awakening',
+        'series': 'The Legend of Zelda',
+        'system': 'Game Boy',
+        'year': '1993'
     }
 }
 
-MAX_STORAGE_MB = 16
+MAX_STORAGE_MB = 256  # Maximum storage limit in MB
 MAX_STORAGE_BYTES = MAX_STORAGE_MB * 1024 * 1024
 
-# Global variables
+# Global variables for dynamic detection
 DETECTED_CARTRIDGES = []
 CARTRIDGE_GAMES_MAP = {}
 BOOT_TIME = datetime.now()
 AVAILABLE_EMULATORS = {}
+CURRENT_GAMES_LIST = []
+CURRENT_GAME_MAP = {}
+LAST_GAMES_SCAN = 0
+LAST_EMULATORS_SCAN = 0
+SCAN_INTERVAL = 2  # seconds
+
+# File system monitoring
+GAMES_LAST_MODIFIED = {}
+EMULATORS_LAST_MODIFIED = {}
 
 # Determine paths
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -155,7 +186,9 @@ SOUND_FILES = {
     "error": os.path.join(SOUNDS_DIRECTORY, "retro-blip-2-236668.mp3"),
     "menu_select": os.path.join(SOUNDS_DIRECTORY, "retro-fart-104576.mp3"),
     "flowey_chat_enter": os.path.join(SOUNDS_DIRECTORY, "retro-jump-1-236684.mp3"),
-    "typing": os.path.join(SOUNDS_DIRECTORY, "retro-jump-1-236684.mp3")
+    "typing": os.path.join(SOUNDS_DIRECTORY, "retro-jump-1-236684.mp3"),
+    "cartridge_insert": os.path.join(SOUNDS_DIRECTORY, "retro-jump-1-236684.mp3"),
+    "cartridge_remove": os.path.join(SOUNDS_DIRECTORY, "retro-blip-2-236668.mp3")
 }
 
 # --- Enhanced Gemini Configuration ---
@@ -192,18 +225,64 @@ except Exception as model_init_error:
     print_formatted_text(HTML(f"<ansiyellow>Warning: Could not initialize Gemini model: {model_init_error}</ansiyellow>"))
     GEMINI_MODEL = None
 
-# --- Emulator Detection and Management ---
-def scan_available_emulators():
-    """Scan the Emulators directory for available emulator executables"""
-    global AVAILABLE_EMULATORS
+# --- Dynamic File System Monitoring ---
+def get_directory_modification_times(directory):
+    """Get modification times for all files in directory"""
+    mod_times = {}
+    if not os.path.exists(directory):
+        return mod_times
+    
+    try:
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    mod_times[file_path] = os.path.getmtime(file_path)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    
+    return mod_times
+
+def has_directory_changed(directory, last_mod_times):
+    """Check if directory contents have changed"""
+    current_mod_times = get_directory_modification_times(directory)
+    
+    # Check if files were added or removed
+    if set(current_mod_times.keys()) != set(last_mod_times.keys()):
+        return True, current_mod_times
+    
+    # Check if any files were modified
+    for file_path, mod_time in current_mod_times.items():
+        if file_path not in last_mod_times or last_mod_times[file_path] != mod_time:
+            return True, current_mod_times
+    
+    return False, current_mod_times
+
+def dynamic_scan_available_emulators():
+    """Dynamically scan for emulators with change detection"""
+    global AVAILABLE_EMULATORS, EMULATORS_LAST_MODIFIED, LAST_EMULATORS_SCAN
+    
+    current_time = time.time()
+    if current_time - LAST_EMULATORS_SCAN < SCAN_INTERVAL:
+        return False  # No scan needed yet
+    
+    LAST_EMULATORS_SCAN = current_time
+    
+    # Check if emulators directory changed
+    changed, new_mod_times = has_directory_changed(EMULATORS_DIRECTORY, EMULATORS_LAST_MODIFIED)
+    
+    if not changed and AVAILABLE_EMULATORS:
+        return False  # No changes detected
+    
+    EMULATORS_LAST_MODIFIED = new_mod_times
+    old_emulators = set(AVAILABLE_EMULATORS.keys())
     AVAILABLE_EMULATORS = {}
     
     if not os.path.exists(EMULATORS_DIRECTORY):
         os.makedirs(EMULATORS_DIRECTORY, exist_ok=True)
-        print_formatted_text(HTML(f"<ansiyellow>Created Emulators directory: {EMULATORS_DIRECTORY}</ansiyellow>"))
-        return
-    
-    print_formatted_text(HTML("<ansicyan>Scanning for emulators...</ansicyan>"))
+        return True
     
     # Scan for executable files and .app bundles
     if platform.system() == 'Darwin':  # macOS
@@ -218,7 +297,6 @@ def scan_available_emulators():
             if os.path.isfile(emulator_path) or (emulator_path.endswith('.app') and os.path.isdir(emulator_path)):
                 emulator_name = os.path.basename(emulator_path).lower()
                 AVAILABLE_EMULATORS[emulator_name] = emulator_path
-                print_formatted_text(HTML(f"<ansigreen>  Found: {os.path.basename(emulator_path)}</ansigreen>"))
     
     # Also check for RetroArch
     retroarch_names = ['retroarch.exe', 'retroarch', 'RetroArch.app']
@@ -226,9 +304,80 @@ def scan_available_emulators():
         retroarch_path = os.path.join(EMULATORS_DIRECTORY, name)
         if os.path.exists(retroarch_path):
             AVAILABLE_EMULATORS['retroarch'] = retroarch_path
-            print_formatted_text(HTML(f"<ansibrightgreen>  Found RetroArch: {retroarch_path}</ansibrightgreen>"))
     
-    print_formatted_text(HTML(f"<ansicyan>Emulator scan complete. Found {len(AVAILABLE_EMULATORS)} emulators.</ansicyan>"))
+    # Check for changes and notify
+    new_emulators = set(AVAILABLE_EMULATORS.keys())
+    added_emulators = new_emulators - old_emulators
+    removed_emulators = old_emulators - new_emulators
+    
+    if added_emulators:
+        for emu in added_emulators:
+            print_formatted_text(HTML(f"<ansibrightgreen>🎮 Emulator detected: {emu}</ansibrightgreen>"))
+            play_sound("cartridge_insert", async_play=True)
+    
+    if removed_emulators:
+        for emu in removed_emulators:
+            print_formatted_text(HTML(f"<ansired>🎮 Emulator removed: {emu}</ansired>"))
+            play_sound("cartridge_remove", async_play=True)
+    
+    return True
+
+def dynamic_discover_games():
+    """Dynamically discover games with change detection"""
+    global CURRENT_GAMES_LIST, GAMES_LAST_MODIFIED, LAST_GAMES_SCAN
+    
+    current_time = time.time()
+    if current_time - LAST_GAMES_SCAN < SCAN_INTERVAL:
+        return False  # No scan needed yet
+    
+    LAST_GAMES_SCAN = current_time
+    
+    # Check if games directory changed
+    changed, new_mod_times = has_directory_changed(GAMES_DIRECTORY, GAMES_LAST_MODIFIED)
+    
+    if not changed and CURRENT_GAMES_LIST:
+        return False  # No changes detected
+    
+    GAMES_LAST_MODIFIED = new_mod_times
+    old_games = set(os.path.basename(game) for game in CURRENT_GAMES_LIST)
+    
+    games = []
+    if not os.path.isdir(GAMES_DIRECTORY):
+        os.makedirs(GAMES_DIRECTORY, exist_ok=True)
+        CURRENT_GAMES_LIST = games
+        return True
+    
+    for filename in os.listdir(GAMES_DIRECTORY):
+        full_path = os.path.join(GAMES_DIRECTORY, filename)
+        if os.path.isdir(full_path):
+            continue
+            
+        # Skip JSON metadata files
+        if filename.endswith('.json'):
+            continue
+            
+        extension = os.path.splitext(filename)[1].lower()
+        if extension in EMULATOR_CONFIGS:
+            games.append(full_path)
+    
+    CURRENT_GAMES_LIST = sorted(games)
+    
+    # Check for changes and notify
+    new_games = set(os.path.basename(game) for game in CURRENT_GAMES_LIST)
+    added_games = new_games - old_games
+    removed_games = old_games - new_games
+    
+    if added_games:
+        for game in added_games:
+            print_formatted_text(HTML(f"<ansibrightgreen>🎯 Game cartridge inserted: {game}</ansibrightgreen>"))
+            play_sound("cartridge_insert", async_play=True)
+    
+    if removed_games:
+        for game in removed_games:
+            print_formatted_text(HTML(f"<ansired>🎯 Game cartridge removed: {game}</ansired>"))
+            play_sound("cartridge_remove", async_play=True)
+    
+    return True
 
 def find_emulator_for_game(game_path):
     """Find the best available emulator for a given game"""
@@ -267,25 +416,27 @@ def find_emulator_for_game(game_path):
 
 # --- DOS-Style UI Functions ---
 def print_dos_header():
-    """Print authentic DOS-style header"""
+    """Print authentic DOS-style header with dynamic info"""
     system_info = platform.system()
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     
     print_formatted_text(HTML("<ansibrightcyan>╔══════════════════════════════════════════════════════════════════════════════╗</ansibrightcyan>"))
-    print_formatted_text(HTML("<ansibrightcyan>║                            RETROFLOW GAMING SYSTEM                          ║</ansibrightcyan>"))
-    print_formatted_text(HTML("<ansibrightcyan>║                              Version 2.0 Enhanced                          ║</ansibrightcyan>"))
+    print_formatted_text(HTML("<ansibrightcyan>║                            RETROFLOW GAMING SYSTEM                           ║</ansibrightcyan>"))
+    print_formatted_text(HTML("<ansibrightcyan>║                           Version 2.1 Dynamic Edition                        ║</ansibrightcyan>"))
     print_formatted_text(HTML("<ansibrightcyan>║                                                                              ║</ansibrightcyan>"))
-    print_formatted_text(HTML(f"<ansibrightcyan>║  System: {system_info:<20} Python: {python_version:<10} Memory: {get_memory_info():<15} ║</ansibrightcyan>"))
-    print_formatted_text(HTML(f"<ansibrightcyan>║  Boot Time: {BOOT_TIME.strftime('%Y-%m-%d %H:%M:%S'):<25} Storage: {get_storage_status():<15} ║</ansibrightcyan>"))
+    print_formatted_text(HTML(f"<ansibrightcyan>║  System: {system_info:<20} Python: {python_version:<10} Memory: {get_memory_info():<15}     ║</ansibrightcyan>"))
+    print_formatted_text(HTML(f"<ansibrightcyan>║  Boot Time: {BOOT_TIME.strftime('%Y-%m-%d %H:%M:%S'):<25} Storage: {get_storage_status():<15}                   ║</ansibrightcyan>"))
+    print_formatted_text(HTML(f"<ansibrightcyan>║  Games: {len(CURRENT_GAMES_LIST):<5} Emulators: {len(AVAILABLE_EMULATORS):<5} Auto-Detect: ON{'':<25}   ║</ansibrightcyan>"))
     print_formatted_text(HTML("<ansibrightcyan>║                                                                              ║</ansibrightcyan>"))
-    print_formatted_text(HTML("<ansibrightcyan>║  [F1] Help    [F2] List Games    [F3] Storage    [F4] Cartridge Scan       ║</ansibrightcyan>"))
-    print_formatted_text(HTML("<ansibrightcyan>║  [F5] Chat    [F6] Auto-Config   [F7] Settings   [F8] Exit                 ║</ansibrightcyan>"))
+    print_formatted_text(HTML("<ansibrightcyan>║  [F1] Help    [F2] List          [F3] Storage    [F4] Scan                  ║ </ansibrightcyan>"))
+    print_formatted_text(HTML("<ansibrightcyan>║  [F5] Chat    [F6] Info (num)    [F7] Refresh   [F8] Exit                     ║</ansibrightcyan>"))
     print_formatted_text(HTML("<ansibrightcyan>╚══════════════════════════════════════════════════════════════════════════════╝</ansibrightcyan>"))
 
 def print_dos_prompt():
-    """Print DOS-style command prompt"""
-    current_time = datetime.now().strftime("%H:%M:%S")
-    return "C:\\RETROFLOW> "
+    """Print DOS-style command prompt with dynamic info"""
+    game_count = len(CURRENT_GAMES_LIST)
+    emu_count = len(AVAILABLE_EMULATORS)
+    return f"C:\\RETROFLOW[G:{game_count}|E:{emu_count}]> "
 
 def get_memory_info():
     """Get system memory info"""
@@ -310,6 +461,7 @@ def print_ascii_art():
     ██╔══██╗██╔══╝     ██║   ██╔══██╗██║   ██║██╔══╝  ██║     ██║   ██║██║███╗██║
     ██║  ██║███████╗   ██║   ██║  ██║╚██████╔╝██║     ███████╗╚██████╔╝╚███╔███╔╝
     ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚══════╝ ╚═════╝  ╚══╝╚══╝ 
+                                    🎮 DYNAMIC CARTRIDGE SYSTEM 🎮
     """
     print_formatted_text(HTML(f"<ansibrightgreen>{art}</ansibrightgreen>"))
 
@@ -415,51 +567,32 @@ def create_launch_command(game_path, emulator_path, game_info):
         game_path=game_path
     )
 
-# --- Enhanced Game Discovery ---
-def discover_games_in_path(directory, is_cartridge=False):
-    """Enhanced game discovery with auto-configuration"""
-    games = []
-    if not os.path.isdir(directory):
-        if not is_cartridge:
-            print_formatted_text(HTML(f"<ansired>Directory not found: {directory}</ansired>"))
-        return games
+# --- Dynamic Game Display ---
+def display_games_dos_style_dynamic():
+    """Display games in authentic DOS style with real-time updates"""
+    global CURRENT_GAME_MAP
     
-    if not is_cartridge:
-        print_loading_animation("Scanning for games", 1)
+    # Perform dynamic scans
+    games_changed = dynamic_discover_games()
+    emulators_changed = dynamic_scan_available_emulators()
     
-    for filename in os.listdir(directory):
-        full_path = os.path.join(directory, filename)
-        if os.path.isdir(full_path):
-            continue
-            
-        # Skip JSON metadata files
-        if filename.endswith('.json'):
-            continue
-            
-        extension = os.path.splitext(filename)[1].lower()
-        if extension in EMULATOR_CONFIGS:
-            games.append(full_path)
-    
-    return sorted(games)
-
-# --- Enhanced Game Display ---
-def display_games_dos_style(local_games, cartridge_games_map):
-    """Display games in authentic DOS style with enhanced info"""
     all_games_map = {}
     current_number = 1
     
     # Clear screen effect
     print("\n" * 2)
     
-    # Local games section
+    # Local games section with dynamic status
+    status_indicator = "🔄 LIVE" if games_changed or emulators_changed else "✓ STABLE"
     print_formatted_text(HTML("<ansibrightcyan>╔═══════════════════════════════════════════════════════════════════════════════╗</ansibrightcyan>"))
-    print_formatted_text(HTML("<ansibrightcyan>║                              LOCAL GAME LIBRARY                              ║</ansibrightcyan>"))
+    print_formatted_text(HTML(f"<ansibrightcyan>║                        LOCAL GAME LIBRARY - {status_indicator}                        ║</ansibrightcyan>"))
     print_formatted_text(HTML("<ansibrightcyan>╠═══════════════════════════════════════════════════════════════════════════════╣</ansibrightcyan>"))
     
-    if not local_games:
+    if not CURRENT_GAMES_LIST:
         print_formatted_text(HTML("<ansibrightcyan>║</ansibrightcyan> <ansiyellow>No games found. Add ROM files to the Games directory.</ansiyellow>                <ansibrightcyan>║</ansibrightcyan>"))
+        print_formatted_text(HTML("<ansibrightcyan>║</ansibrightcyan> <ansicyan>System will auto-detect new games when added!</ansicyan>                      <ansibrightcyan>║</ansibrightcyan>"))
     else:
-        for game_path in local_games:
+        for game_path in CURRENT_GAMES_LIST:
             game_info = auto_detect_game_info(game_path)
             file_size = format_bytes(game_info['file_size'])
             
@@ -479,39 +612,10 @@ def display_games_dos_style(local_games, cartridge_games_map):
     
     print_formatted_text(HTML("<ansibrightcyan>╚═══════════════════════════════════════════════════════════════════════════════╝</ansibrightcyan>"))
     
-    # Cartridge section
-    if cartridge_games_map:
-        print_formatted_text(HTML("\n<ansibrightmagenta>╔═══════════════════════════════════════════════════════════════════════════════╗</ansibrightmagenta>"))
-        print_formatted_text(HTML("<ansibrightmagenta>║                              CARTRIDGE GAMES                                 ║</ansibrightmagenta>"))
-        print_formatted_text(HTML("<ansibrightmagenta>╠═══════════════════════════════════════════════════════════════════════════════╣</ansibrightmagenta>"))
-        
-        for cartridge_path, games_on_cart in cartridge_games_map.items():
-            cart_name = os.path.basename(cartridge_path)
-            cart_size = format_bytes(get_directory_size(cartridge_path))
-            print_formatted_text(HTML(f"<ansibrightmagenta>║</ansibrightmagenta> <ansicyan>Cartridge: {cart_name} ({cart_size})</ansicyan>                                    <ansibrightmagenta>║</ansibrightmagenta>"))
-            
-            if not games_on_cart:
-                print_formatted_text(HTML("<ansibrightmagenta>║</ansibrightmagenta> <ansiyellow>  No compatible games found on this cartridge.</ansiyellow>                        <ansibrightmagenta>║</ansibrightmagenta>"))
-            else:
-                for game_path in games_on_cart:
-                    game_info = auto_detect_game_info(game_path)
-                    file_size = format_bytes(game_info['file_size'])
-                    
-                    # Check if emulator is available
-                    emulator_path, _ = find_emulator_for_game(game_path)
-                    status = "✓" if emulator_path else "✗"
-                    
-                    game_line = f"[{current_number:2d}] {status} {game_info['game_name']:<33} {game_info['system']:<13} {file_size:>8}"
-                    if len(game_line) > 73:
-                        game_line = game_line[:70] + "..."
-                    
-                    color = "ansibrightgreen" if emulator_path else "ansiyellow"
-                    print_formatted_text(HTML(f"<ansibrightmagenta>║</ansibrightmagenta> <{color}>  {game_line:<73}</{color}> <ansibrightmagenta>║</ansibrightmagenta>"))
-                    all_games_map[str(current_number)] = game_path
-                    current_number += 1
-        
-        print_formatted_text(HTML("<ansibrightmagenta>╚═══════════════════════════════════════════════════════════════════════════════╝</ansibrightmagenta>"))
+    # Dynamic status footer
+    print_formatted_text(HTML(f"<ansicyan>📊 Status: {len(CURRENT_GAMES_LIST)} games, {len(AVAILABLE_EMULATORS)} emulators | Auto-refresh every {SCAN_INTERVAL}s</ansicyan>"))
     
+    CURRENT_GAME_MAP = all_games_map
     return all_games_map
 
 # --- Enhanced Game Launcher ---
@@ -538,6 +642,7 @@ def launch_game_enhanced(game_path):
     if not emulator_path:
         print_formatted_text(HTML(f"<ansired>ERROR: Required emulator '{game_info['emulator_name']}' not found!</ansired>"))
         print_formatted_text(HTML(f"<ansiyellow>Please add {game_info['emulator_exe']} to the Emulators directory.</ansiyellow>"))
+        print_formatted_text(HTML(f"<ansicyan>The system will auto-detect it once added!</ansicyan>"))
         play_sound("error")
         return
     
@@ -589,8 +694,9 @@ def flowey_chatbot_enhanced(session, style):
     
     flowey_intro = [
         "Howdy! I'm FLOWEY. FLOWEY the FLOWER!",
-        "Welcome to my retro gaming paradise, you determined little human!",
-        "I see you've got some classic Pokémon and Zelda games... EXCELLENT taste!",
+        "Welcome to my DYNAMIC retro gaming paradise, you determined little human!",
+        f"I see you've got {len(CURRENT_GAMES_LIST)} games and {len(AVAILABLE_EMULATORS)} emulators... IMPRESSIVE!",
+        "I love how this system auto-detects new cartridges! Just like the old days!",
         "Need help with your games? I know EVERYTHING about retro gaming!",
         "",
         "Type 'bye' to leave (if you can bear to part with me!)"
@@ -616,10 +722,10 @@ def flowey_chatbot_enhanced(session, style):
             
             if user_input.lower() in ['bye', 'exit', 'quit', 'goodbye']:
                 farewell_messages = [
-                    "See ya later, gaming buddy! Go catch 'em all!",
+                    "See ya later, gaming buddy! Keep adding those cartridges!",
                     "Don't forget - in this world, it's PLAY or BE PLAYED!",
-                    "May your Pokémon never faint and your saves never corrupt!",
-                    "Remember: DETERMINATION is the key to beating any gym leader!"
+                    "May your games auto-detect and your emulators never crash!",
+                    "Remember: DETERMINATION is the key to beating any dynamic system!"
                 ]
                 print_formatted_text(HTML(f"<ansiyellow>Flowey: {random.choice(farewell_messages)}</ansiyellow>"))
                 play_sound("menu_select")
@@ -628,11 +734,11 @@ def flowey_chatbot_enhanced(session, style):
             if not user_input:
                 continue
             
-            # Enhanced AI response
+            # Enhanced AI response with dynamic context
             if chat and GEMINI_MODEL:
                 try:
-                    # Add context about the current gaming session
-                    context_prompt = f"User message: {user_input}\n\nContext: We're in a retro gaming terminal called RetroFlow. The user has Pokémon Crystal, Pokémon Sapphire, and Zelda games available."
+                    game_list = [os.path.basename(game) for game in CURRENT_GAMES_LIST[:5]]  # First 5 games
+                    context_prompt = f"User message: {user_input}\n\nContext: We're in a dynamic retro gaming terminal called RetroFlow. The user currently has {len(CURRENT_GAMES_LIST)} games including: {', '.join(game_list)}. The system auto-detects new games and emulators."
                     response = chat.send_message(context_prompt)
                     
                     # Add typing effect
@@ -654,15 +760,15 @@ def flowey_chatbot_enhanced(session, style):
                     print_formatted_text(HTML(f"<ansiyellow>Flowey: {random.choice(fallback_responses)}</ansiyellow>"))
                     play_sound("error")
             else:
-                # Enhanced fallback responses with game-specific content
+                # Enhanced fallback responses with dynamic content
                 fallback_responses = [
-                    "That's interesting, human! Tell me more about your retro gaming adventures!",
-                    "Ah, a fellow connoisseur of vintage pixels! I approve of your Pokémon collection!",
-                    "You know, back in my day, games had REAL challenge! Not like these modern hand-holders!",
-                    "Determination! That's what I like to see in a trainer!",
+                    f"That's interesting, human! You've got {len(CURRENT_GAMES_LIST)} games to choose from!",
+                    "Ah, a fellow connoisseur of vintage pixels! I love your dynamic collection!",
+                    "You know, back in my day, we had to manually detect cartridges! This auto-system is AMAZING!",
+                    "Determination! That's what I like to see in a retro gamer!",
                     "Have you tried the Konami Code? Up, Up, Down, Down, Left, Right, Left, Right, B, A!",
-                    "Pokémon Crystal is a classic! Did you know it was the first Pokémon game with a female protagonist option?",
-                    "Sapphire Version... ah, the Hoenn region! Watch out for those trumpets in the music!"
+                    f"With {len(AVAILABLE_EMULATORS)} emulators, you're ready for anything!",
+                    "I love how this system detects new games automatically! Just like magic!"
                 ]
                 print_formatted_text(HTML(f"<ansiyellow>Flowey: {random.choice(fallback_responses)}</ansiyellow>"))
             
@@ -727,15 +833,40 @@ def scan_cartridges():
     
     print_formatted_text(HTML(f"<ansibrightgreen>Cartridge scan complete! Found {len(CARTRIDGE_GAMES_MAP)} cartridges with games.</ansibrightgreen>"))
 
+def discover_games_in_path(directory, is_cartridge=False):
+    """Discover games in a specific path"""
+    games = []
+    if not os.path.isdir(directory):
+        return games
+    
+    for filename in os.listdir(directory):
+        full_path = os.path.join(directory, filename)
+        if os.path.isdir(full_path):
+            continue
+            
+        # Skip JSON metadata files
+        if filename.endswith('.json'):
+            continue
+            
+        extension = os.path.splitext(filename)[1].lower()
+        if extension in EMULATOR_CONFIGS:
+            games.append(full_path)
+    
+    return sorted(games)
+
 def display_emulator_status():
-    """Display available emulators"""
+    """Display available emulators with dynamic status"""
+    # Force a fresh scan
+    dynamic_scan_available_emulators()
+    
     print_formatted_text(HTML("<ansibrightcyan>╔═══════════════════════════════════════════════════════════════════════════════╗</ansibrightcyan>"))
-    print_formatted_text(HTML("<ansibrightcyan>║                              EMULATOR STATUS                                 ║</ansibrightcyan>"))
+    print_formatted_text(HTML("<ansibrightcyan>║                           EMULATOR STATUS - LIVE                             ║</ansibrightcyan>"))
     print_formatted_text(HTML("<ansibrightcyan>╠═══════════════════════════════════════════════════════════════════════════════╣</ansibrightcyan>"))
     
     if not AVAILABLE_EMULATORS:
         print_formatted_text(HTML("<ansibrightcyan>║</ansibrightcyan> <ansired>No emulators found in Emulators directory!</ansired>                              <ansibrightcyan>║</ansibrightcyan>"))
         print_formatted_text(HTML("<ansibrightcyan>║</ansibrightcyan> <ansiyellow>Add emulator executables to: Emulators/</ansiyellow>                             <ansibrightcyan>║</ansibrightcyan>"))
+        print_formatted_text(HTML("<ansibrightcyan>║</ansibrightcyan> <ansicyan>System will auto-detect them when added!</ansicyan>                           <ansibrightcyan>║</ansibrightcyan>"))
     else:
         for emu_name, emu_path in AVAILABLE_EMULATORS.items():
             status_line = f"✓ {emu_name:<30} {os.path.dirname(emu_path)}"
@@ -744,31 +875,30 @@ def display_emulator_status():
             print_formatted_text(HTML(f"<ansibrightcyan>║</ansibrightcyan> <ansibrightgreen>{status_line:<75}</ansibrightgreen> <ansibrightcyan>║</ansibrightcyan>"))
     
     print_formatted_text(HTML("<ansibrightcyan>╚═══════════════════════════════════════════════════════════════════════════════╝</ansibrightcyan>"))
+    print_formatted_text(HTML(f"<ansicyan>🔄 Auto-refresh: Every {SCAN_INTERVAL} seconds | Last scan: {datetime.now().strftime('%H:%M:%S')}</ansicyan>"))
 
 # --- Main Enhanced Terminal ---
 def main():
-    """Enhanced main terminal function"""
+    """Enhanced main terminal function with dynamic detection"""
     # Startup sequence
     play_sound("startup")
     print_ascii_art()
     time.sleep(1)
-    print_dos_header()
     
     # Initialize
-    print_loading_animation("Initializing RetroFlow System", 2)
+    print_loading_animation("Initializing Dynamic RetroFlow System", 2)
     
     # Create directories if they don't exist
     os.makedirs(GAMES_DIRECTORY, exist_ok=True)
     os.makedirs(EMULATORS_DIRECTORY, exist_ok=True)
     os.makedirs(CORES_DIRECTORY, exist_ok=True)
     
-    # Scan for emulators
-    scan_available_emulators()
+    # Initial scans
+    dynamic_scan_available_emulators()
+    dynamic_discover_games()
     
-    # Initial game scan
-    local_games_list = discover_games_in_path(GAMES_DIRECTORY)
-    scan_cartridges()
-    current_game_map = display_games_dos_style(local_games_list, CARTRIDGE_GAMES_MAP)
+    print_dos_header()
+    current_game_map = display_games_dos_style_dynamic()
     
     # Enhanced DOS-style prompt
     style = Style.from_dict({
@@ -782,10 +912,8 @@ def main():
     # Command completer
     command_words = [
         'help', 'exit', 'list', 'play', 'chat', 'storage', 'scan', 'autoconfig',
-        'clear', 'dir', 'cls', 'info', 'about', 'version', 'emulators'
+        'clear', 'dir', 'cls', 'info', 'about', 'version', 'emulators', 'refresh'
     ]
-    if current_game_map:
-        command_words.extend(current_game_map.keys())
     
     try:
         completer = WordCompleter(command_words, ignore_case=True)
@@ -793,15 +921,19 @@ def main():
     except Exception:
         session = PromptSession(style=style)
     
+    print_formatted_text(HTML("<ansibrightgreen>🎮 Dynamic Cartridge System Active! Add/remove games and emulators anytime!</ansibrightgreen>"))
+    
     # Main command loop
     while True:
         try:
+            # Dynamic updates happen automatically in display function
+            
             # Check storage
             current_storage = get_directory_size(GAMES_DIRECTORY)
             if current_storage > MAX_STORAGE_BYTES:
                 print_formatted_text(HTML(f"<ansired>⚠ WARNING: Storage limit exceeded! ({format_bytes(current_storage)}/{MAX_STORAGE_MB}MB)</ansired>"))
             
-            # Get command
+            # Get command with dynamic prompt
             command = session.prompt(print_dos_prompt()).strip()
             
             if not command:
@@ -811,27 +943,29 @@ def main():
             cmd_lower = command.lower()
             
             if cmd_lower in ['exit', 'quit', 'bye']:
-                print_formatted_text(HTML("<ansibrightcyan>Thank you for using RetroFlow! Game on!</ansibrightcyan>"))
+                print_formatted_text(HTML("<ansibrightcyan>Thank you for using Dynamic RetroFlow! Game on!</ansibrightcyan>"))
                 play_sound("menu_select")
                 break
             
             elif cmd_lower in ['help', '?', 'h']:
                 help_lines = [
                     "╔═══════════════════════════════════════════════════════════════════════════════╗",
-                    "║                                RETROFLOW HELP                                ║",
+                    "║                            DYNAMIC RETROFLOW HELP                            ║",
                     "╠═══════════════════════════════════════════════════════════════════════════════╣",
                     "║ COMMAND         │ DESCRIPTION                                               ║",
                     "╠═════════════════┼═══════════════════════════════════════════════════════════╣",
-                    "║ list            │ Display all available games                              ║",
-                    "║ play <number>   │ Launch game by number (e.g., 'play 1')                  ║",
+                    "║ list            │ Display all available games (auto-refreshes)            ║",
+                    "║ play (number)   │ Launch game by number (e.g., 'play 1')                  ║",
                     "║ chat            │ Talk to Flowey, your AI gaming assistant                ║",
                     "║ scan            │ Scan for cartridge games on USB drives                  ║",
                     "║ storage         │ Check storage usage and limits                           ║",
-                    "║ emulators       │ Show available emulators and their status               ║",
-                    "║ autoconfig      │ Auto-configure all games in directory                   ║",
+                    "║ emulators       │ Show available emulators (live status)                  ║",
+                    "║ refresh         │ Force refresh of games and emulators                    ║",
                     "║ clear/cls       │ Clear the screen                                         ║",
-                    "║ info <number>   │ Get detailed info about a specific game                 ║",
+                    "║ info (number)   │ Get detailed info about a specific game                 ║",
                     "║ exit            │ Exit RetroFlow                                           ║",
+                    "╠═══════════════════════════════════════════════════════════════════════════════╣",
+                    "║ 🎮 DYNAMIC FEATURES: Games and emulators auto-detect every 2 seconds!       ║",
                     "╚═══════════════════════════════════════════════════════════════════════════════╝"
                 ]
                 for line in help_lines:
@@ -839,14 +973,25 @@ def main():
                 play_sound("menu_select")
             
             elif cmd_lower in ['list', 'ls', 'dir']:
-                local_games_list = discover_games_in_path(GAMES_DIRECTORY)
-                current_game_map = display_games_dos_style(local_games_list, CARTRIDGE_GAMES_MAP)
+                current_game_map = display_games_dos_style_dynamic()
+                play_sound("menu_select")
+            
+            elif cmd_lower in ['refresh', 'reload', 'rescan']:
+                print_loading_animation("Force refreshing system", 2)
+                # Reset scan times to force immediate refresh
+                global LAST_GAMES_SCAN, LAST_EMULATORS_SCAN
+                LAST_GAMES_SCAN = 0
+                LAST_EMULATORS_SCAN = 0
+                current_game_map = display_games_dos_style_dynamic()
+                print_formatted_text(HTML("<ansibrightgreen>🔄 System refreshed! All games and emulators rescanned.</ansibrightgreen>"))
                 play_sound("menu_select")
             
             elif cmd_lower.startswith('play '):
                 parts = command.split(' ', 1)
                 if len(parts) > 1:
                     game_num = parts[1].strip()
+                    # Refresh game map to ensure it's current
+                    current_game_map = display_games_dos_style_dynamic()
                     if game_num in current_game_map:
                         launch_game_enhanced(current_game_map[game_num])
                     else:
@@ -861,8 +1006,7 @@ def main():
             
             elif cmd_lower in ['scan', 'cartridge']:
                 scan_cartridges()
-                local_games_list = discover_games_in_path(GAMES_DIRECTORY)
-                current_game_map = display_games_dos_style(local_games_list, CARTRIDGE_GAMES_MAP)
+                current_game_map = display_games_dos_style_dynamic()
                 play_sound("menu_select")
             
             elif cmd_lower == 'emulators':
@@ -879,6 +1023,8 @@ def main():
                     f"║ Total Limit:    {MAX_STORAGE_MB}MB{'':<51} ║",
                     f"║ Available:      {format_bytes(MAX_STORAGE_BYTES - current_storage):<55} ║",
                     f"║ Status:         {'⚠ OVER LIMIT' if current_storage > MAX_STORAGE_BYTES else '✓ OK':<55} ║",
+                    f"║ Games Count:    {len(CURRENT_GAMES_LIST):<55} ║",
+                    f"║ Auto-Refresh:   Every {SCAN_INTERVAL} seconds{'':<39} ║",
                     "╚═══════════════════════════════════════════════════════════════════════════════╝"
                 ]
                 for line in storage_lines:
@@ -891,18 +1037,12 @@ def main():
                 print_ascii_art()
                 print_dos_header()
             
-            elif cmd_lower == 'autoconfig':
-                print_loading_animation("Auto-configuring games", 3)
-                scan_available_emulators()
-                local_games_list = discover_games_in_path(GAMES_DIRECTORY)
-                print_formatted_text(HTML(f"<ansibrightgreen>Auto-configured {len(local_games_list)} games successfully!</ansibrightgreen>"))
-                current_game_map = display_games_dos_style(local_games_list, CARTRIDGE_GAMES_MAP)
-                play_sound("menu_select")
-            
             elif cmd_lower.startswith('info '):
                 parts = command.split(' ', 1)
                 if len(parts) > 1:
                     game_num = parts[1].strip()
+                    # Refresh game map to ensure it's current
+                    current_game_map = display_games_dos_style_dynamic()
                     if game_num in current_game_map:
                         game_path = current_game_map[game_num]
                         game_info = auto_detect_game_info(game_path)
@@ -919,6 +1059,7 @@ def main():
                             f"║ File Size:      {format_bytes(game_info['file_size']):<59} ║",
                             f"║ Filename:       {game_info['filename']:<59} ║",
                             f"║ Auto-Config:    {'Yes' if game_info['auto_configured'] else 'No':<59} ║",
+                            f"║ Detection:      Dynamic (Real-time){'':<43} ║",
                             "╚═══════════════════════════════════════════════════════════════════════════════╝"
                         ]
                         for line in info_lines:
@@ -935,7 +1076,7 @@ def main():
                 play_sound("error")
         
         except (KeyboardInterrupt, EOFError):
-            print_formatted_text(HTML("<ansibrightcyan>Goodbye! Thanks for using RetroFlow!</ansibrightcyan>"))
+            print_formatted_text(HTML("<ansibrightcyan>Goodbye! Thanks for using Dynamic RetroFlow!</ansibrightcyan>"))
             play_sound("menu_select")
             break
         except Exception as e:
