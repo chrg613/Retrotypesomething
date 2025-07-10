@@ -3,3 +3,4 @@ to run(on mac terminal):pyinstaller --onefile --name "RetroFlow Terminal" --add-
 to delete the prev files and run again:rm -rf build/
 rm -rf dist/
 rm -f *.spec
+add a mGBA emulator in the Emulators file
