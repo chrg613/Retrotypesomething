@@ -1,1 +1,2 @@
 # Retrotypesomething
+to run(on mac terminal):pyinstaller --onefile --name "RetroFlow Terminal" --add-data "Games:Games" --add-data "Sounds:Sounds" game_launcher.py
