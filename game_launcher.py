@@ -114,46 +114,7 @@ EMULATOR_CONFIGS = {
 
 # Game-specific enhancements for better recognition
 GAME_DATABASE = {
-    'pokemon crystal': {
-        'full_name': 'Pokémon Crystal Version',
-        'series': 'Pokémon',
-        'generation': 'Gen II',
-        'system': 'Game Boy Color',
-        'year': '2000'
-    },
-    'pokemon sapphire': {
-        'full_name': 'Pokémon Sapphire Version',
-        'series': 'Pokémon',
-        'generation': 'Gen III',
-        'system': 'Game Boy Advance',
-        'year': '2002'
-    },
-    'pokemon ruby': {
-        'full_name': 'Pokémon Ruby Version',
-        'series': 'Pokémon',
-        'generation': 'Gen III',
-        'system': 'Game Boy Advance',
-        'year': '2002'
-    },
-    'pokemon emerald': {
-        'full_name': 'Pokémon Emerald Version',
-        'series': 'Pokémon',
-        'generation': 'Gen III',
-        'system': 'Game Boy Advance',
-        'year': '2004'
-    },
-    'zelda': {
-        'full_name': 'The Legend of Zelda',
-        'series': 'The Legend of Zelda',
-        'system': 'Game Boy',
-        'year': '1989'
-    },
-    'link\'s awakening': {
-        'full_name': 'The Legend of Zelda: Link\'s Awakening',
-        'series': 'The Legend of Zelda',
-        'system': 'Game Boy',
-        'year': '1993'
-    }
+    
 }
 
 MAX_STORAGE_MB = 256  # Maximum storage limit in MB
